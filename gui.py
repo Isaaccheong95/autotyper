@@ -269,6 +269,16 @@ class AutoTyperGUI:
             set_row2, text="Line-by-line", variable=self.var_mode, value=MODE_LINE
         ).pack(side="left")
 
+        set_row3 = ttk.Frame(frm_set)
+        set_row3.pack(fill="x", **pad)
+
+        self.var_background = tk.BooleanVar(value=True)
+        ttk.Checkbutton(
+            set_row3,
+            text="Background typing (type into target while you use other windows)",
+            variable=self.var_background,
+        ).pack(side="left")
+
         # ── Controls ──────────────────────────────────────────
         frm_ctrl = ttk.Frame(self.root)
         frm_ctrl.pack(fill="x", padx=8, pady=(6, 2))
@@ -435,6 +445,7 @@ class AutoTyperGUI:
             countdown=countdown,
             on_progress=self._on_progress,
             on_done=self._on_done,
+            background=self.var_background.get(),
         )
 
         # Start polling status
