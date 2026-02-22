@@ -1,17 +1,32 @@
 # AutoTyper
 
-A Windows desktop productivity tool that automatically types text/code into any editor window (VS Code, Cursor, PyCharm, Notepad++, etc.). Built with Python 3, tkinter, and pyautogui.
+A Windows desktop tool that types text or code into another app window (VS Code, Cursor, PyCharm, Notepad++, terminals, and more).
 
-> **This is a personal productivity / accessibility tool.** It does not bypass CAPTCHAs, anti-bot systems, or any security protections.
+Built with Python 3, tkinter, Win32 APIs, `pyautogui`, and `pynput`.
 
----
+> This is a personal productivity and accessibility tool. It does not bypass CAPTCHAs, anti-bot systems, or security controls.
+
+## Latest Features
+
+- Background typing via Win32 `PostMessage` (`WM_CHAR`) so typing can continue in the target while you use other windows.
+- Foreground fallback mode for editors that do not accept background message-based input.
+- Human-like typing engine with profile presets: `Smooth`, `Natural`, `Slow & Deliberate`, and `Custom`.
+- Typo-and-correction simulation with typo profiles: `Off`, `Subtle`, `Natural`, and `Messy but realistic`.
+- Safe code typo mode to avoid risky typo injection contexts (for example strings and escaped sections).
+- Optional seed control for reproducible human-like timing runs.
+- Context-aware timing effects:
+  - punctuation and newline pause multipliers
+  - burst typing with boundary pauses
+  - extra pauses on long words, symbol-heavy lines, and likely code boundaries
+- Optional coordinate click before typing (manual X/Y or delayed capture with `Ctrl+Shift+C`).
+- Live status updates with line and character progress.
 
 ## Quick Start
 
 ### 1. Prerequisites
 
-- **Python 3.10+** – [python.org/downloads](https://www.python.org/downloads/)
-- **Windows 10/11**
+- Python 3.10+ ([python.org/downloads](https://www.python.org/downloads/))
+- Windows 10/11
 
 ### 2. Install dependencies
 
@@ -26,95 +41,76 @@ pip install -r requirements.txt
 python main.py
 ```
 
----
-
 ## How to Use
 
-1. **Paste or load text** – type/paste code into the text box, or click **Load File** to open a file.
-2. **Select target window** – pick the editor from the dropdown (click **Refresh** if it's missing).
-3. **Place your cursor** – click the exact insertion point in the target editor.
-4. **Click Start (or press F6)** – confirm the dialog, then the countdown begins. Switch to your editor during the countdown.
-5. **Pause / Resume** – press **F7** at any time.
-6. **Emergency Stop** – press **Esc** to halt immediately.
-
-### Optional: Coordinate Click Mode
-
-If you want AutoTyper to click a specific position before typing:
-
-1. Check **"Click position before typing"**.
-2. Click **Capture (Ctrl+Shift+C)** → position your mouse → coordinates are saved after 3 seconds.
-3. When you press Start, the tool will click that position first, then type.
-
----
-
-## Global Hotkeys
-
-| Hotkey | Action |
-|---|---|
-| **F6** | Start typing |
-| **F7** | Pause / Resume |
-| **Esc** | Emergency stop |
-| **Ctrl+Shift+C** | Capture mouse coordinates |
-
-These work even when the AutoTyper window is not focused.
-
----
+1. Paste text into the editor or click `Load File`.
+2. Select the target window from the dropdown (`Refresh` if needed).
+3. Place the target cursor at the insertion point.
+4. Optional: enable `Click position before typing` and capture coordinates.
+5. Choose typing settings:
+   - `Char-by-char` or `Line-by-line`
+   - background typing on/off
+   - human-like typing profile and typo profile (optional)
+6. Press `Start` (or `F6`), confirm, and wait for the countdown.
+7. Use `F7` to pause/resume and `Esc` to stop immediately.
 
 ## Typing Modes
 
 | Mode | Behavior |
 |---|---|
-| **Char-by-char** | Types each character individually with the configured delay. Best for realistic typing simulation. |
-| **Line-by-line** | Types each whole line at once, then presses Enter. Faster, useful as a fallback if an editor handles character input oddly. |
+| `Char-by-char` | Types one character at a time. Supports fixed delay mode or human-like timing mode. |
+| `Line-by-line` | Types each line and submits newline boundaries quickly. Good fallback for some editors. |
 
----
+## Send Modes
+
+| Mode | Behavior |
+|---|---|
+| Background typing (default) | Activates the target window, locates focused control, and sends characters via Win32 messages. |
+| Foreground typing | Uses `pyautogui` key events. Useful if background messaging does not work with a specific app. |
+
+## Human-like Typing
+
+Human-like mode is available in `Char-by-char` mode and includes:
+
+- Configurable base speed and jitter.
+- Punctuation/newline pause scaling.
+- Burst rhythm simulation.
+- Optional typo injection and realistic correction flow:
+  - delayed typo awareness
+  - hesitation before correction
+  - backspacing with variable tempo and mini-pauses
+  - retype and resume with cooldown
+
+## Global Hotkeys
+
+| Hotkey | Action |
+|---|---|
+| `F6` | Start typing |
+| `F7` | Pause or resume |
+| `Esc` | Stop |
+| `Ctrl+Shift+C` | Capture mouse coordinates |
+
+Hotkeys work globally, even when AutoTyper is not focused.
 
 ## Project Structure
 
-```
+```text
 autotyper/
-├── main.py            # Entry point, global hotkeys
-├── gui.py             # Tkinter GUI layout and event handlers
-├── typing_engine.py   # Background typing thread (pause/resume/stop)
-├── window_manager.py  # Window enumeration, activation (Win32 API)
-├── settings.py        # Shared state dataclass, default constants
-├── requirements.txt   # Python dependencies
-└── README.md          # This file
+|-- main.py            # App entry point and global hotkeys
+|-- gui.py             # Tkinter UI and handlers
+|-- typing_engine.py   # Typing worker, strategies, typo simulation
+|-- window_manager.py  # Window discovery/activation and clicking helpers
+|-- settings.py        # Shared state, defaults, profiles
+|-- requirements.txt   # Dependencies
+`-- README.md          # Documentation
 ```
 
-### Key Functions
+## Known Limitations
 
-| Module | Function | Purpose |
-|---|---|---|
-| `window_manager` | `get_window_list()` | Enumerates visible windows via Win32 `EnumWindows` |
-| `window_manager` | `activate_window(hwnd)` | Brings a window to the foreground |
-| `typing_engine` | `start_typing(...)` | Launches the typing thread with countdown, mode dispatch, and progress callbacks |
-| `typing_engine` | `_type_char_by_char(...)` | Character-level typing loop with pause/stop checks |
-| `typing_engine` | `_type_line_by_line(...)` | Line-level typing loop |
-| `gui` | `AutoTyperGUI` | Builds the full UI and handles button/hotkey events |
-
----
-
-## Limitations
-
-1. **UAC-elevated windows** – Windows blocks simulated input to admin/elevated processes. Run AutoTyper as admin if the target is elevated.
-2. **`pyautogui.write()` is ASCII-only** – Unicode characters (non-Latin alphabets, emoji) may not type correctly. Use clipboard-paste mode (see v2 ideas) as a workaround.
-3. **Tab handling** – Some editors (VS Code, PyCharm) intercept Tab for autocompletion/indentation. Character-by-char mode sends `Tab` keypresses, which may trigger editor features instead of inserting a tab character.
-4. **Coordinate drift** – Saved (x, y) coordinates become invalid if the target window is moved or resized after capture.
-5. **Focus stealing** – Other popups or notifications that steal focus during typing will cause characters to go to the wrong window.
-6. **Speed floor** – Very low delays (< 5 ms) may be unreliable due to OS scheduling and `pyautogui`'s overhead.
-7. **pyautogui fail-safe** – Moving the mouse to the top-left corner of the screen triggers `pyautogui.FailSafeException` and aborts typing. This is a safety feature.
-
----
-
-## Suggested v2 Improvements
-
-- **Save / load presets** – save text + settings as named profiles
-- **Recent windows list** – remember the last few target windows
-- **Hotkey customization** – let the user rebind F6/F7/Esc in settings
-- **Clipboard-paste mode** – copy chunks to clipboard and Ctrl+V for Unicode support
-- **Syntax-aware pauses** – add extra delays after certain tokens (`;`, `{`, etc.) for more natural-looking typing
-- **Progress bar** – visual progress indicator in the GUI
-- **System tray icon** – minimize to tray with status indicator
-- **Logging** – save typing history to a log file
-- **Multi-monitor support** – better coordinate handling across monitors
+1. UAC and privilege boundaries: typing into elevated/admin apps may fail unless AutoTyper is run with matching privileges.
+2. Background compatibility varies: some app frameworks may ignore `WM_CHAR`; use foreground mode in that case.
+3. Special key behavior is app-specific: tabs/newlines may trigger editor features (autocomplete, indentation, command modes).
+4. Coordinate drift: saved X/Y may become wrong after window moves, DPI changes, or monitor changes.
+5. Foreground mode focus risk: if another window steals focus, input goes to the wrong app.
+6. Very low delays can be unreliable because of OS scheduling and input stack limits.
+7. `pyautogui` fail-safe is enabled; moving mouse to top-left can abort foreground typing.
