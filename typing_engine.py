@@ -18,6 +18,7 @@ import threading
 import time
 import traceback
 from dataclasses import dataclass
+from enum import Enum
 from typing import Callable
 
 import pyautogui
@@ -189,6 +190,35 @@ class DelayContext:
     next_char: str
 
 
+class TypingPhase(str, Enum):
+    """State machine phases for human-like typo and correction behavior."""
+
+    TYPING_NORMAL = "TYPING_NORMAL"
+    TYPO_ACTIVE_UNNOTICED = "TYPO_ACTIVE_UNNOTICED"
+    TYPO_NOTICED_HESITATING = "TYPO_NOTICED_HESITATING"
+    CORRECTING_BACKSPACE = "CORRECTING_BACKSPACE"
+    CORRECTING_RETYPE = "CORRECTING_RETYPE"
+    RESUME_NORMAL = "RESUME_NORMAL"
+
+
+@dataclass
+class TypoEvent:
+    """Represents one injected typo and its correction progress."""
+
+    original_char: str
+    typed_wrong_char: str
+    typo_index: int
+    chars_typed_after_typo: int
+    awareness_threshold_chars: int
+    awareness_threshold_words: int | None
+    words_typed_after_typo: int = 0
+    _current_word_has_chars: bool = False
+
+    @property
+    def chars_to_backspace(self) -> int:
+        return self.chars_typed_after_typo + 1
+
+
 class FixedDelayStrategy:
     """Constant delay strategy (classic mode)."""
 
@@ -201,18 +231,102 @@ class FixedDelayStrategy:
             return self.line_delay_s
         return self.char_delay_s
 
-    def maybe_typo(self, _char: str, _context: DelayContext) -> str | None:
+    def build_typo_event(self, _context: DelayContext) -> TypoEvent | None:
         return None
 
-    def typo_delay(self) -> float:
+    def typo_notice_reached(self, _event: TypoEvent) -> bool:
+        return False
+
+    def correction_hesitation_delay(self, _event: TypoEvent, _line_text: str) -> float:
         return 0.0
 
-    def correction_delay(self) -> float:
+    def maybe_double_hesitation_delay(self) -> float:
         return 0.0
+
+    def backspace_delay(self) -> float:
+        return 0.0
+
+    def should_backspace_pause(self, _done: int, _total: int) -> bool:
+        return False
+
+    def backspace_pause_delay(self) -> float:
+        return 0.0
+
+    def typo_cooldown_chars(self) -> int:
+        return 0
+
+    def debug(self, _message: str) -> None:
+        return
+
+
+def _is_word_char(ch: str) -> bool:
+    return ch.isalnum() or ch == "_"
+
+
+def _track_words_after_typo(event: TypoEvent, typed_char: str) -> None:
+    if _is_word_char(typed_char):
+        event._current_word_has_chars = True
+        return
+    if event._current_word_has_chars:
+        event.words_typed_after_typo += 1
+        event._current_word_has_chars = False
+
+
+def _finalize_typo_word_count(event: TypoEvent) -> None:
+    if event._current_word_has_chars:
+        event.words_typed_after_typo += 1
+        event._current_word_has_chars = False
+
+
+def _build_delay_contexts(text: str) -> tuple[list[DelayContext], list[str]]:
+    """Build per-character contexts for the full text stream."""
+    lines = text.split("\n")
+    contexts: list[DelayContext] = []
+    prev_char = ""
+    global_index = 0
+
+    for li, line in enumerate(lines):
+        for ci, ch in enumerate(line):
+            next_char = (
+                line[ci + 1]
+                if ci + 1 < len(line)
+                else ("\n" if li < len(lines) - 1 else "")
+            )
+            contexts.append(
+                DelayContext(
+                    char=ch,
+                    line_text=line,
+                    line_index=li,
+                    col_index=ci,
+                    global_index=global_index,
+                    prev_char=prev_char,
+                    next_char=next_char,
+                )
+            )
+            prev_char = ch
+            global_index += 1
+
+        if li < len(lines) - 1:
+            next_char = lines[li + 1][0] if lines[li + 1] else ""
+            contexts.append(
+                DelayContext(
+                    char="\n",
+                    line_text=line,
+                    line_index=li,
+                    col_index=len(line),
+                    global_index=global_index,
+                    prev_char=prev_char,
+                    next_char=next_char,
+                )
+            )
+            prev_char = "\n"
+            global_index += 1
+
+    return contexts, lines
 
 
 class HumanLikeDelayStrategy:
-    """Context-aware timing strategy with bursts, pauses, and optional typos."""
+    """Context-aware timing strategy with bursts, pauses, and typo realism."""
 
     def __init__(self, config: HumanTypingConfig) -> None:
         self.config = config
@@ -244,28 +358,144 @@ class HumanLikeDelayStrategy:
 
         return max(0.001, base_ms / 1000.0)
 
-    def maybe_typo(self, char: str, _context: DelayContext) -> str | None:
+    def build_typo_event(self, context: DelayContext) -> TypoEvent | None:
         if not self.config.typo_enabled:
             return None
-        if self.rng.random() >= self.config.typo_probability:
+        if self.rng.random() >= max(0.0, min(1.0, self.config.typo_probability)):
+            return None
+        if not self._is_typo_candidate(context):
             return None
 
-        lower = char.lower()
+        lower = context.char.lower()
         if lower not in _NEARBY_KEYS:
             return None
 
         wrong = self.rng.choice(_NEARBY_KEYS[lower])
-        if char.isupper():
+        if context.char.isupper():
             wrong = wrong.upper()
-        if wrong == char:
+        if wrong == context.char:
             return None
-        return wrong
 
-    def typo_delay(self) -> float:
-        return self.rng.uniform(0.015, 0.055)
+        min_chars = max(1, self.config.typo_awareness_min_chars)
+        max_chars = max(min_chars, self.config.typo_awareness_max_chars)
+        awareness_words: int | None = None
+        if self.config.typo_awareness_word_based:
+            min_words = max(0, self.config.typo_awareness_min_words)
+            max_words = max(min_words, self.config.typo_awareness_max_words)
+            awareness_words = self.rng.randint(min_words, max_words)
 
-    def correction_delay(self) -> float:
-        return self.rng.uniform(0.010, 0.045)
+        return TypoEvent(
+            original_char=context.char,
+            typed_wrong_char=wrong,
+            typo_index=context.global_index,
+            chars_typed_after_typo=0,
+            awareness_threshold_chars=self.rng.randint(min_chars, max_chars),
+            awareness_threshold_words=awareness_words,
+        )
+
+    def typo_notice_reached(self, event: TypoEvent) -> bool:
+        if event.chars_typed_after_typo >= event.awareness_threshold_chars:
+            return True
+        if event.awareness_threshold_words is None:
+            return False
+        return event.words_typed_after_typo >= event.awareness_threshold_words
+
+    def correction_hesitation_delay(self, event: TypoEvent, line_text: str) -> float:
+        min_ms = max(0, self.config.correction_hesitation_min_ms)
+        max_ms = max(min_ms, self.config.correction_hesitation_max_ms)
+
+        bonus_ms = 0.0
+        if event.chars_to_backspace >= 8:
+            bonus_ms += self.rng.uniform(40.0, 180.0)
+        if self._is_symbol_heavy_line(line_text):
+            bonus_ms += self.rng.uniform(35.0, 160.0)
+
+        low = min_ms + (bonus_ms * 0.35)
+        high = max_ms + bonus_ms
+        if high < low:
+            high = low
+        return self.rng.uniform(low, high) / 1000.0
+
+    def maybe_double_hesitation_delay(self) -> float:
+        probability = max(0.0, min(1.0, self.config.double_hesitation_probability))
+        if self.rng.random() >= probability:
+            return 0.0
+        return self.rng.uniform(0.05, 0.24)
+
+    def backspace_delay(self) -> float:
+        min_ms = max(1, self.config.backspace_min_ms)
+        max_ms = max(min_ms, self.config.backspace_max_ms)
+        delay_ms = self.rng.uniform(min_ms, max_ms)
+        if self.rng.random() < 0.23:
+            delay_ms *= self.rng.uniform(0.75, 1.2)
+            delay_ms = max(min_ms, min(max_ms, delay_ms))
+        return delay_ms / 1000.0
+
+    def should_backspace_pause(self, done: int, total: int) -> bool:
+        every_n = max(0, self.config.backspace_pause_every_n)
+        if every_n <= 0:
+            return False
+        if total < every_n + 1:
+            return False
+        if done >= total:
+            return False
+        if done % every_n != 0:
+            return False
+        return True
+
+    def backspace_pause_delay(self) -> float:
+        min_ms = max(0, self.config.backspace_pause_min_ms)
+        max_ms = max(min_ms, self.config.backspace_pause_max_ms)
+        return self.rng.uniform(min_ms, max_ms) / 1000.0
+
+    def typo_cooldown_chars(self) -> int:
+        min_chars = max(0, self.config.typo_cooldown_min_chars)
+        max_chars = max(min_chars, self.config.typo_cooldown_max_chars)
+        return self.rng.randint(min_chars, max_chars)
+
+    def debug(self, message: str) -> None:
+        if self.config.debug_typo_events:
+            print(f"[typo-debug] {message}", flush=True)
+
+    def _is_typo_candidate(self, context: DelayContext) -> bool:
+        ch = context.char
+        lower = ch.lower()
+        if lower not in _NEARBY_KEYS:
+            return False
+        if not self.config.safe_code_typo_mode:
+            return True
+
+        if not ch.isalpha():
+            return False
+        if "\\" in context.line_text:
+            return False
+        if self._likely_inside_string(context.line_text, context.col_index):
+            return False
+
+        indent_len = len(context.line_text) - len(context.line_text.lstrip(" \t"))
+        if context.col_index < indent_len:
+            return False
+        return True
+
+    @staticmethod
+    def _likely_inside_string(line: str, col_index: int) -> bool:
+        active_quote = ""
+        escaped = False
+        for i, ch in enumerate(line):
+            if i > col_index:
+                break
+            if escaped:
+                escaped = False
+                continue
+            if ch == "\\":
+                escaped = True
+                continue
+            if ch in ("'", '"'):
+                if not active_quote:
+                    active_quote = ch
+                elif active_quote == ch:
+                    active_quote = ""
+        return bool(active_quote)
 
     def _base_delay_ms(self, _context: DelayContext) -> float:
         jitter = self.rng.uniform(-self.config.jitter_ms, self.config.jitter_ms)
@@ -367,82 +597,149 @@ def _type_char_by_char(
     send_fn: Callable[[str], None],
     delay_strategy: FixedDelayStrategy | HumanLikeDelayStrategy,
 ) -> bool:
-    lines = text.split("\n")
+    contexts, lines = _build_delay_contexts(text)
     state.total_lines = len(lines)
     state.total_chars = len(text)
-    global_char = 0
-    prev_char = ""
+    next_index = 0
+    phase = TypingPhase.TYPING_NORMAL
+    typo_event: TypoEvent | None = None
+    typo_cooldown_remaining = 0
 
-    for li, line in enumerate(lines):
-        state.line_index = li
+    while True:
+        if state.stop_requested:
+            return False
+        if not _wait_while_paused(state):
+            return False
 
-        for ci, ch in enumerate(line):
-            if state.stop_requested:
+        if phase in (TypingPhase.TYPING_NORMAL, TypingPhase.TYPO_ACTIVE_UNNOTICED):
+            if next_index >= len(contexts):
+                if phase == TypingPhase.TYPO_ACTIVE_UNNOTICED and typo_event:
+                    _finalize_typo_word_count(typo_event)
+                    phase = TypingPhase.TYPO_NOTICED_HESITATING
+                    continue
+                return True
+
+            context = contexts[next_index]
+            state.line_index = context.line_index
+            state.char_index = next_index
+
+            emit_char = context.char
+            injected = False
+            if phase == TypingPhase.TYPING_NORMAL and typo_cooldown_remaining <= 0:
+                candidate_event = delay_strategy.build_typo_event(context)
+                if candidate_event:
+                    typo_event = candidate_event
+                    emit_char = candidate_event.typed_wrong_char
+                    injected = True
+                    phase = TypingPhase.TYPO_ACTIVE_UNNOTICED
+                    delay_strategy.debug(
+                        "injected typo at index "
+                        f"{candidate_event.typo_index}: '{candidate_event.original_char}' "
+                        f"-> '{candidate_event.typed_wrong_char}', awareness "
+                        f"{candidate_event.awareness_threshold_chars} chars"
+                        + (
+                            f"/{candidate_event.awareness_threshold_words} words"
+                            if candidate_event.awareness_threshold_words is not None
+                            else ""
+                        )
+                    )
+
+            send_fn(emit_char)
+            next_index += 1
+            on_progress(context.line_index, next_index, state.total_lines, state.total_chars)
+            if typo_cooldown_remaining > 0:
+                typo_cooldown_remaining -= 1
+
+            if phase == TypingPhase.TYPO_ACTIVE_UNNOTICED and typo_event and not injected:
+                typo_event.chars_typed_after_typo += 1
+                _track_words_after_typo(typo_event, context.char)
+                if delay_strategy.typo_notice_reached(typo_event):
+                    phase = TypingPhase.TYPO_NOTICED_HESITATING
+                    delay_strategy.debug(
+                        "noticed typo after "
+                        f"{typo_event.chars_typed_after_typo} chars / "
+                        f"{typo_event.words_typed_after_typo} words"
+                    )
+
+            if not _sleep_with_controls(state, delay_strategy.get_delay(context.char, context, state)):
                 return False
-            if not _wait_while_paused(state):
+            continue
+
+        if phase == TypingPhase.TYPO_NOTICED_HESITATING:
+            if not typo_event:
+                phase = TypingPhase.RESUME_NORMAL
+                continue
+
+            reference_index = min(max(0, next_index - 1), len(contexts) - 1) if contexts else 0
+            line_text = contexts[reference_index].line_text if contexts else ""
+            hesitation = delay_strategy.correction_hesitation_delay(typo_event, line_text)
+            delay_strategy.debug(f"hesitation before correction: {hesitation * 1000:.0f} ms")
+            if not _sleep_with_controls(state, hesitation):
                 return False
 
-            next_char = line[ci + 1] if ci + 1 < len(line) else ("\n" if li < len(lines) - 1 else "")
-            context = DelayContext(
-                char=ch,
-                line_text=line,
-                line_index=li,
-                col_index=ci,
-                global_index=global_char,
-                prev_char=prev_char,
-                next_char=next_char,
-            )
+            second_pause = delay_strategy.maybe_double_hesitation_delay()
+            if second_pause > 0:
+                delay_strategy.debug(f"second hesitation: {second_pause * 1000:.0f} ms")
+                if not _sleep_with_controls(state, second_pause):
+                    return False
 
-            typo_char = delay_strategy.maybe_typo(ch, context)
-            if typo_char:
-                send_fn(typo_char)
-                if not _sleep_with_controls(state, delay_strategy.typo_delay()):
+            phase = TypingPhase.CORRECTING_BACKSPACE
+            continue
+
+        if phase == TypingPhase.CORRECTING_BACKSPACE:
+            if not typo_event:
+                phase = TypingPhase.RESUME_NORMAL
+                continue
+
+            to_backspace = max(0, next_index - typo_event.typo_index)
+            for count in range(1, to_backspace + 1):
+                if state.stop_requested:
+                    return False
+                if not _wait_while_paused(state):
                     return False
                 send_fn("\b")
-                if not _sleep_with_controls(state, delay_strategy.correction_delay()):
+                if not _sleep_with_controls(state, delay_strategy.backspace_delay()):
+                    return False
+                if delay_strategy.should_backspace_pause(count, to_backspace):
+                    pause_s = delay_strategy.backspace_pause_delay()
+                    delay_strategy.debug(
+                        f"mid-correction pause after {count} backspaces: {pause_s * 1000:.0f} ms"
+                    )
+                    if not _sleep_with_controls(state, pause_s):
+                        return False
+
+            delay_strategy.debug(f"backspaced {to_backspace} chars")
+            phase = TypingPhase.CORRECTING_RETYPE
+            continue
+
+        if phase == TypingPhase.CORRECTING_RETYPE:
+            if not typo_event:
+                phase = TypingPhase.RESUME_NORMAL
+                continue
+
+            for idx in range(typo_event.typo_index, next_index):
+                if state.stop_requested:
+                    return False
+                if not _wait_while_paused(state):
+                    return False
+                context = contexts[idx]
+                state.line_index = context.line_index
+                send_fn(context.char)
+                if not _sleep_with_controls(state, delay_strategy.get_delay(context.char, context, state)):
                     return False
 
-            state.char_index = global_char
-            send_fn(ch)
-            global_char += 1
-            on_progress(li, global_char, state.total_lines, state.total_chars)
-
-            if not _sleep_with_controls(
-                state, delay_strategy.get_delay(ch, context, state)
-            ):
-                return False
-
-            prev_char = ch
-
-        if li < len(lines) - 1:
-            if state.stop_requested:
-                return False
-            if not _wait_while_paused(state):
-                return False
-
-            next_char = lines[li + 1][0] if lines[li + 1] else ""
-            context = DelayContext(
-                char="\n",
-                line_text=line,
-                line_index=li,
-                col_index=len(line),
-                global_index=global_char,
-                prev_char=prev_char,
-                next_char=next_char,
+            delay_strategy.debug(
+                "corrected typo at index "
+                f"{typo_event.typo_index}; resumed typing at source index {next_index}"
             )
+            typo_cooldown_remaining = delay_strategy.typo_cooldown_chars()
+            phase = TypingPhase.RESUME_NORMAL
+            continue
 
-            send_fn("\n")
-            global_char += 1
-            on_progress(li, global_char, state.total_lines, state.total_chars)
-
-            if not _sleep_with_controls(
-                state, delay_strategy.get_delay("\n", context, state)
-            ):
-                return False
-
-            prev_char = "\n"
-
-    return True
+        if phase == TypingPhase.RESUME_NORMAL:
+            typo_event = None
+            phase = TypingPhase.TYPING_NORMAL
+            continue
 
 
 def _type_line_by_line(

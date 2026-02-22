@@ -18,6 +18,8 @@ from settings import (
     HUMAN_PROFILES,
     HUMAN_PROFILE_CUSTOM,
     HUMAN_PROFILE_NATURAL,
+    TYPO_PROFILE_NATURAL,
+    TYPO_PROFILES,
     MODE_CHAR,
     MODE_LINE,
     STATUS_COUNTDOWN,
@@ -27,6 +29,7 @@ from settings import (
     STATUS_STOPPED,
     STATUS_TYPING,
     HumanTypingConfig,
+    apply_typo_profile,
     human_profile_defaults,
 )
 from typing_engine import start_typing
@@ -337,6 +340,18 @@ class AutoTyperGUI:
         self.spn_human_burst_max = ttk.Spinbox(h_row4, from_=1, to=100, width=5)
         self.spn_human_burst_max.pack(side="left", padx=(4, 10))
 
+        ttk.Label(h_row4, text="Correction profile:").pack(side="left")
+        self.var_typo_profile = tk.StringVar(value=TYPO_PROFILE_NATURAL)
+        self.cmb_typo_profile = ttk.Combobox(
+            h_row4,
+            state="readonly",
+            width=18,
+            textvariable=self.var_typo_profile,
+            values=TYPO_PROFILES,
+        )
+        self.cmb_typo_profile.pack(side="left", padx=(4, 10))
+        self.cmb_typo_profile.bind("<<ComboboxSelected>>", self._on_typo_profile_selected)
+
         self.var_typo_enabled = tk.BooleanVar(value=False)
         ttk.Checkbutton(
             h_row4,
@@ -345,9 +360,20 @@ class AutoTyperGUI:
             command=self._on_human_setting_changed,
         ).pack(side="left", padx=(8, 8))
 
-        ttk.Label(h_row4, text="Typo probability:").pack(side="left")
-        self.spn_typo_probability = ttk.Spinbox(h_row4, from_=0.0, to=0.3, increment=0.001, width=7)
-        self.spn_typo_probability.pack(side="left", padx=(2, 2))
+        h_row5 = ttk.Frame(frm_human)
+        h_row5.pack(fill="x", **pad)
+
+        ttk.Label(h_row5, text="Typo probability:").pack(side="left")
+        self.spn_typo_probability = ttk.Spinbox(h_row5, from_=0.0, to=0.3, increment=0.001, width=7)
+        self.spn_typo_probability.pack(side="left", padx=(2, 12))
+
+        self.var_safe_code_typo_mode = tk.BooleanVar(value=True)
+        ttk.Checkbutton(
+            h_row5,
+            text="Safe code typo mode",
+            variable=self.var_safe_code_typo_mode,
+            command=self._on_human_setting_changed,
+        ).pack(side="left", padx=(4, 10))
 
         self.lbl_human_preview = ttk.Label(
             frm_human,
@@ -390,11 +416,30 @@ class AutoTyperGUI:
             self._set_spinbox_value(self.spn_human_newline, f"{preset.newline_pause_multiplier:.1f}")
             self._set_spinbox_value(self.spn_human_burst_min, preset.burst_min_chars)
             self._set_spinbox_value(self.spn_human_burst_max, preset.burst_max_chars)
-            self.var_typo_enabled.set(preset.typo_enabled)
-            self._set_spinbox_value(self.spn_typo_probability, f"{preset.typo_probability:.3f}")
+            self._set_typo_controls_from_config(preset)
             self.ent_human_seed.delete(0, "end")
         finally:
             self._is_applying_human_profile = False
+
+    def _set_typo_controls_from_config(self, config: HumanTypingConfig) -> None:
+        self.var_typo_profile.set(config.typo_profile)
+        self.var_typo_enabled.set(config.typo_enabled)
+        self._set_spinbox_value(self.spn_typo_probability, f"{config.typo_probability:.3f}")
+        self.var_safe_code_typo_mode.set(config.safe_code_typo_mode)
+
+    def _apply_typo_profile(self, profile: str) -> None:
+        preset = human_profile_defaults(HUMAN_PROFILE_NATURAL)
+        apply_typo_profile(preset, profile)
+        self._is_applying_human_profile = True
+        try:
+            self._set_typo_controls_from_config(preset)
+        finally:
+            self._is_applying_human_profile = False
+
+    def _on_typo_profile_selected(self, _event=None) -> None:
+        profile = self.var_typo_profile.get()
+        self._apply_typo_profile(profile)
+        self._on_human_setting_changed()
 
     def _on_human_profile_selected(self, _event=None) -> None:
         profile = self.var_human_profile.get()
@@ -453,10 +498,16 @@ class AutoTyperGUI:
         if config.burst_max_chars < config.burst_min_chars:
             config.burst_max_chars = config.burst_min_chars
 
+        typo_profile = self.var_typo_profile.get().strip() or TYPO_PROFILE_NATURAL
+        apply_typo_profile(config, typo_profile)
+        config.typo_profile = typo_profile
         config.typo_enabled = self.var_typo_enabled.get()
         config.typo_probability = self._read_float(
             self.spn_typo_probability, config.typo_probability, 0.0, 0.3
         )
+
+        config.safe_code_typo_mode = self.var_safe_code_typo_mode.get()
+        config.debug_typo_events = False
 
         seed_raw = self.ent_human_seed.get().strip()
         if not seed_raw:
@@ -492,7 +543,8 @@ class AutoTyperGUI:
             f"(+/-{config.jitter_ms}ms), punctuation pauses x{config.punctuation_pause_multiplier:.1f}, "
             f"newline pauses x{config.newline_pause_multiplier:.1f}, bursts {config.burst_min_chars}-"
             f"{config.burst_max_chars} chars, typo simulation {typo_text} "
-            f"({config.typo_probability:.3f}), {seed_text}."
+            f"profile={config.typo_profile}, p={config.typo_probability:.3f}, "
+            f"safe-mode {'on' if config.safe_code_typo_mode else 'off'}, {seed_text}."
         )
 
     def _update_human_preview(self) -> None:
