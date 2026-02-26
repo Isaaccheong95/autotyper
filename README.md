@@ -4,7 +4,7 @@ A Windows desktop tool that types text or code into another app window (VS Code,
 
 Built with Python 3, tkinter, Win32 APIs, `pyautogui`, and `pynput`.
 
-> This is a personal productivity and accessibility tool. It does not bypass CAPTCHAs, anti-bot systems, or security controls.
+> This is a personal productivity and accessibility tool.
 
 ## Latest Features
 
